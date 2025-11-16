@@ -3,19 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, Save } from 'lucide-react';
 import { motion } from 'framer-motion';
-
-interface ICP {
-  id: number;
-  name: string;
-  description: string;
-  size_buckets: string[];
-  industries: string[];
-  locations: string[];
-  hiring_keywords: string[];
-  pain_keywords: string[];
-  channel_preferences: string[];
-  created_at: string;
-}
+import { listICPs, createICP, deleteICP, type ICP } from '@/lib/api';
 
 const SIZE_BUCKETS = ['1', '2-5', '6-10', '11-20'];
 const INDUSTRIES = [
@@ -61,9 +49,7 @@ export default function ICPBuilder() {
   const fetchICPs = async () => {
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/icp/');
-      if (!response.ok) throw new Error('Failed to fetch ICPs');
-      const data = await response.json();
+      const data = await listICPs();
       setICPs(data);
     } catch (err) {
       console.error('Error fetching ICPs:', err);
@@ -83,13 +69,7 @@ export default function ICPBuilder() {
     }
 
     try {
-      const response = await fetch('http://localhost:8000/api/icp/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
-      });
-
-      if (!response.ok) throw new Error('Failed to save ICP');
+      await createICP(formData);
 
       // Refresh list
       await fetchICPs();

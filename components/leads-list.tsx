@@ -3,24 +3,7 @@
 import { useEffect, useState } from 'react';
 import { AlertCircle, Loader2, Eye, Trash2 } from 'lucide-react';
 import { motion } from 'framer-motion';
-
-interface Lead {
-  id: number;
-  company_id: number;
-  company: {
-    id: number;
-    name: string;
-    website?: string;
-    sector?: string;
-  };
-  total_score: number;
-  score_bucket: string;
-  role_type?: string;
-  pain_tags: string[];
-  status: string;
-  created_at: string;
-  context_dossier?: string;
-}
+import { listLeads, getLead, updateLeadStatus, deleteLead, type Lead } from '@/lib/api';
 
 export default function LeadsList() {
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -33,12 +16,10 @@ export default function LeadsList() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(
-        `http://localhost:8000/api/leads?score_min=${scoreFilter}&limit=50`,
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-      if (!response.ok) throw new Error('Failed to fetch leads');
-      const data = await response.json();
+      const data = await listLeads({
+        score_min: scoreFilter,
+        limit: 50,
+      });
       setLeads(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -206,8 +187,20 @@ export default function LeadsList() {
                 <p className="text-slate-400 text-xs uppercase tracking-wide">Status</p>
                 <select
                   value={selectedLead.status}
-                  onChange={(e) => {
-                    // TODO: Update lead status
+                  onChange={async (e) => {
+                    try {
+                      await updateLeadStatus(selectedLead.id, e.target.value);
+                      // Update local state
+                      setSelectedLead({
+                        ...selectedLead,
+                        status: e.target.value,
+                      });
+                      // Refresh leads list
+                      fetchLeads();
+                    } catch (err) {
+                      console.error('Failed to update status:', err);
+                      alert('Failed to update status');
+                    }
                   }}
                   className="w-full mt-1 px-2 py-1 bg-slate-700 text-white rounded text-xs border border-slate-600"
                 >
@@ -230,11 +223,28 @@ export default function LeadsList() {
               )}
 
               <div className="flex gap-2 pt-4">
-                <button className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold transition-colors">
+                <button
+                  onClick={() => {
+                    // Just deselect to see full lead in list
+                    setSelectedLead(null);
+                  }}
+                  className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-semibold transition-colors">
                   <Eye className="h-3 w-3 inline mr-1" />
                   View
                 </button>
-                <button className="flex-1 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold transition-colors">
+                <button
+                  onClick={async () => {
+                    if (!confirm('Delete this lead?')) return;
+                    try {
+                      await deleteLead(selectedLead.id);
+                      setSelectedLead(null);
+                      fetchLeads();
+                    } catch (err) {
+                      console.error('Failed to delete lead:', err);
+                      alert('Failed to delete lead');
+                    }
+                  }}
+                  className="flex-1 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-semibold transition-colors">
                   <Trash2 className="h-3 w-3 inline mr-1" />
                   Delete
                 </button>

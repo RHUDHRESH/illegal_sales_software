@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, Activity, AlertCircle } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { getBucketCounts } from '@/lib/api';
 
 interface BucketCounts {
   red_hot: number;
@@ -54,11 +55,7 @@ export default function Dashboard() {
 
   const fetchCounts = async () => {
     try {
-      const response = await fetch(
-        'http://localhost:8000/api/leads/score-distribution/bucket-counts'
-      );
-      if (!response.ok) throw new Error('Failed to fetch counts');
-      const data = await response.json();
+      const data = await getBucketCounts();
       setCounts(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

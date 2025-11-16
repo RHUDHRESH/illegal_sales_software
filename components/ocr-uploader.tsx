@@ -3,23 +3,7 @@
 import { useState, useRef } from 'react';
 import { Upload, Loader2, CheckCircle2, AlertCircle, Copy } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-
-interface ClassificationResult {
-  icp_match: boolean;
-  total_score: number;
-  score_bucket: string;
-  company_id: number | null;
-  lead_id: number | null;
-  classification: Record<string, unknown>;
-}
-
-interface OCRResult {
-  extracted_text: string;
-  detected_emails: string[];
-  detected_phones: string[];
-  detected_names: string[];
-  detected_company: string | null;
-}
+import { ocrAndClassify, type ClassificationResult, type OCRResult } from '@/lib/api';
 
 export default function OCRUploader() {
   const [isDragging, setIsDragging] = useState(false);
@@ -69,43 +53,22 @@ export default function OCRUploader() {
     setError(null);
 
     try {
-      // Step 1: OCR
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-
-      const ocrResponse = await fetch('http://localhost:8000/api/ingest/ocr', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!ocrResponse.ok) {
-        throw new Error('OCR processing failed');
-      }
-
-      const ocrData: OCRResult = await ocrResponse.json();
-      setOCRResult(ocrData);
-
-      // Step 2: Classify
-      const classifyFormData = new FormData();
-      classifyFormData.append('file', selectedFile);
-      if (ocrData.detected_company) {
-        classifyFormData.append('company_name', ocrData.detected_company);
-      }
-
-      const classifyResponse = await fetch(
-        'http://localhost:8000/api/ingest/ocr-and-classify',
-        {
-          method: 'POST',
-          body: classifyFormData,
-        }
-      );
-
-      if (!classifyResponse.ok) {
-        throw new Error('Classification failed');
-      }
-
-      const classifyData: ClassificationResult = await classifyResponse.json();
+      // Use OCR and Classify combined endpoint
+      const classifyData = await ocrAndClassify(selectedFile);
       setClassificationResult(classifyData);
+
+      // Also fetch OCR result for display (if available from API)
+      // For now, we'll just show the text from classification
+      if (classifyData.classification) {
+        const mockOCR: OCRResult = {
+          extracted_text: classifyData.classification.signal_text as string || '',
+          detected_emails: [],
+          detected_phones: [],
+          detected_names: [],
+          detected_company: classifyData.classification.company_name as string || undefined,
+        };
+        setOCRResult(mockOCR);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
