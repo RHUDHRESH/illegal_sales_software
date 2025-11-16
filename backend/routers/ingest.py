@@ -7,11 +7,17 @@ from PIL import Image
 import io
 import re
 import logging
+import csv
 from typing import Optional
 from pydantic import BaseModel
 from database import SessionLocal
 from routers.classify import classify_signal as classify_signal_func
 from routers.classify import SignalInput
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,28 +80,46 @@ async def ingest_ocr(
     db: Session = Depends(get_db),
 ):
     """
-    Upload an image or PDF and extract text via OCR.
+    Upload an image or PDF and extract text.
+    For images: use Tesseract OCR.
+    For PDFs: extract text directly (faster, no rasterization).
     Also extract contact info (emails, phones, names, company).
     """
     try:
         # Read file
         contents = await file.read()
 
-        # OCR extraction
+        # Extract text based on file type
         if file.content_type.startswith("image"):
-            # Image handling
+            # Image handling: use Tesseract OCR
             image = Image.open(io.BytesIO(contents))
             extracted_text = pytesseract.image_to_string(image, lang='eng')
-        elif file.content_type == "application/pdf":
-            # For PDFs, we'd need pdf2image or pdfplumber
-            # Simple fallback: warn user
-            logger.warning(f"PDF support not yet implemented. File: {file.filename}")
-            extracted_text = "[PDF processing not yet implemented]"
+            logger.info(f"OCR'd image: {file.filename}")
+        elif file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
+            # PDF handling: extract text directly using pypdf
+            if PdfReader is None:
+                raise HTTPException(status_code=500, detail="PDF support not available. Install pypdf: pip install pypdf")
+
+            try:
+                pdf_file = io.BytesIO(contents)
+                reader = PdfReader(pdf_file)
+                pages_text = []
+                for page_num, page in enumerate(reader.pages):
+                    text = page.extract_text()
+                    if text:
+                        pages_text.append(text)
+                extracted_text = "\n".join(pages_text)
+                logger.info(f"Extracted text from {len(reader.pages)} pages of {file.filename}")
+            except Exception as pdf_err:
+                raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {str(pdf_err)}")
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type. Use image or PDF.")
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use image (.jpg, .png, .gif) or PDF.")
 
         # Clean up extracted text
         extracted_text = extracted_text.strip()
+
+        if not extracted_text:
+            raise HTTPException(status_code=400, detail="Failed to extract text from file")
 
         # Extract contact info
         emails = extract_emails(extracted_text)
@@ -111,6 +135,8 @@ async def ingest_ocr(
             detected_company=company,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in OCR ingest: {e}")
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
@@ -123,28 +149,47 @@ async def ingest_ocr_and_classify(
     db: Session = Depends(get_db),
 ):
     """
-    Upload a file, OCR it, and immediately classify as a lead.
-    If score > threshold, queue dossier generation.
+    Upload a file (image or PDF), extract text, and immediately classify as a lead.
+    If score > threshold, queue dossier generation (background task).
     """
     try:
-        # Step 1: OCR
+        # Step 1: Extract text
         contents = await file.read()
 
         if file.content_type.startswith("image"):
+            # Image: OCR with Tesseract
             image = Image.open(io.BytesIO(contents))
             extracted_text = pytesseract.image_to_string(image, lang='eng')
+            source_type = "ocr_image"
+        elif file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
+            # PDF: text extraction
+            if PdfReader is None:
+                raise HTTPException(status_code=500, detail="PDF support not available. Install: pip install pypdf")
+
+            try:
+                pdf_file = io.BytesIO(contents)
+                reader = PdfReader(pdf_file)
+                pages_text = []
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        pages_text.append(text)
+                extracted_text = "\n".join(pages_text)
+                source_type = "ocr_pdf"
+            except Exception as pdf_err:
+                raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {str(pdf_err)}")
         else:
-            raise HTTPException(status_code=400, detail="Only images supported for OCR classification right now")
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use image or PDF.")
 
         extracted_text = extracted_text.strip()
 
         if not extracted_text:
-            raise HTTPException(status_code=400, detail="OCR failed to extract text from image")
+            raise HTTPException(status_code=400, detail="Failed to extract text from file")
 
         # Step 2: Classify
         signal = SignalInput(
             signal_text=extracted_text,
-            source_type="ocr",
+            source_type=source_type,
             company_name=company_name or extract_company(extracted_text),
         )
 
@@ -160,14 +205,16 @@ async def ingest_ocr_and_classify(
 @router.post("/csv")
 async def ingest_csv(
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
 ):
     """
-    Bulk ingest from CSV.
-    Expected columns: company_name, website, signal_text
+    Bulk ingest from CSV and classify each signal.
+    Expected columns: company_name, company_website (optional), signal_text
+
+    Returns summary of created leads.
     """
     try:
-        import csv
         import io as stdio
 
         contents = await file.read()
@@ -175,22 +222,48 @@ async def ingest_csv(
         csv_reader = csv.DictReader(stream)
 
         results = []
+        processed_count = 0
+
         for row in csv_reader:
+            signal_text = row.get("signal_text", "").strip()
+            company_name = row.get("company_name", "").strip()
+
+            if not signal_text:
+                continue  # Skip empty rows
+
+            processed_count += 1
+
+            # Create signal input
             signal = SignalInput(
-                signal_text=row.get("signal_text", ""),
+                signal_text=signal_text,
                 source_type="csv",
-                company_name=row.get("company_name"),
+                company_name=company_name or None,
+                company_website=row.get("company_website") or None,
             )
-            if signal.signal_text:
+
+            # Classify synchronously (for CSV, we do batch processing)
+            try:
+                result = await classify_signal_func(signal, background_tasks, db)
                 results.append({
-                    "company": signal.company_name,
-                    "queued": True,
+                    "company": company_name,
+                    "score": result.total_score,
+                    "bucket": result.score_bucket,
+                    "lead_id": result.lead_id,
+                    "status": "created",
+                })
+            except Exception as e:
+                logger.error(f"Error classifying CSV row {processed_count}: {e}")
+                results.append({
+                    "company": company_name,
+                    "status": "error",
+                    "error": str(e),
                 })
 
         return {
-            "count": len(results),
+            "total_processed": processed_count,
+            "total_created": len([r for r in results if r.get("status") == "created"]),
             "results": results,
-            "message": "Signals queued for classification",
+            "message": f"Processed {processed_count} rows, created {len([r for r in results if r.get('status') == 'created'])} leads",
         }
 
     except Exception as e:
