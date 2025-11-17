@@ -2,77 +2,20 @@
 
 from fastapi import APIRouter, UploadFile, File, Depends, BackgroundTasks, HTTPException
 from sqlalchemy.orm import Session
-import pytesseract
-from PIL import Image
-import io
-import re
 import logging
 import csv
 from typing import Optional
-from pydantic import BaseModel
-from database import SessionLocal
-from routers.classify import classify_signal as classify_signal_func
-from routers.classify import SignalInput
 
-try:
-    from pypdf import PdfReader
-except ImportError:
-    PdfReader = None
+from dependencies import get_db, get_settings
+from schemas.ingest import OCRResult
+from schemas.classification import SignalInput
+from services.ingest_service import IngestService
+from services.classification_service import ClassificationService
+from config import Settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-class OCRResult(BaseModel):
-    extracted_text: str
-    detected_emails: list
-    detected_phones: list
-    detected_names: list
-    detected_company: Optional[str]
-
-def extract_emails(text: str) -> list:
-    """Extract email addresses from text using regex."""
-    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    return re.findall(email_pattern, text)
-
-def extract_phones(text: str) -> list:
-    """Extract phone numbers from text using regex."""
-    phone_patterns = [
-        r'\+91[-.\s]?\d{10}',  # +91 followed by 10 digits
-        r'91[-.\s]?\d{10}',  # 91 followed by 10 digits
-        r'\b\d{10}\b',  # 10 consecutive digits
-        r'[6-9]\d{9}',  # Indian phone starting with 6-9
-    ]
-    phones = []
-    for pattern in phone_patterns:
-        phones.extend(re.findall(pattern, text))
-    return list(set(phones))  # Remove duplicates
-
-def extract_names(text: str) -> list:
-    """Simple name extraction - look for capitalized word sequences."""
-    # Very basic: find sequences of capitalized words
-    name_pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
-    return re.findall(name_pattern, text)[:5]  # Return max 5
-
-def extract_company(text: str) -> Optional[str]:
-    """Try to extract company name from text."""
-    # Look for common patterns: "Company:", "at X", "X Ltd", "X Pvt Ltd"
-    patterns = [
-        r'(?:Company|company|business|firm|organization)\s*:?\s*([A-Za-z0-9\s&.,]+)',
-        r'at\s+([A-Za-z0-9\s&]+?)(?:\s+[,.]|$)',
-        r'([A-Za-z0-9\s&]+?)\s+(?:Pvt|Ltd|Inc|Corporation|Services)',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1).strip()
-    return None
 
 @router.post("/ocr", response_model=OCRResult)
 async def ingest_ocr(
@@ -90,42 +33,29 @@ async def ingest_ocr(
         contents = await file.read()
 
         # Extract text based on file type
-        if file.content_type.startswith("image"):
-            # Image handling: use Tesseract OCR
-            image = Image.open(io.BytesIO(contents))
-            extracted_text = pytesseract.image_to_string(image, lang='eng')
+        if file.content_type and file.content_type.startswith("image"):
+            extracted_text = IngestService.extract_text_from_image(contents)
             logger.info(f"OCR'd image: {file.filename}")
         elif file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
-            # PDF handling: extract text directly using pypdf
-            if PdfReader is None:
-                raise HTTPException(status_code=500, detail="PDF support not available. Install pypdf: pip install pypdf")
-
             try:
-                pdf_file = io.BytesIO(contents)
-                reader = PdfReader(pdf_file)
-                pages_text = []
-                for page_num, page in enumerate(reader.pages):
-                    text = page.extract_text()
-                    if text:
-                        pages_text.append(text)
-                extracted_text = "\n".join(pages_text)
-                logger.info(f"Extracted text from {len(reader.pages)} pages of {file.filename}")
-            except Exception as pdf_err:
-                raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {str(pdf_err)}")
+                extracted_text = IngestService.extract_text_from_pdf(contents)
+                logger.info(f"Extracted text from PDF: {file.filename}")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type. Use image (.jpg, .png, .gif) or PDF.")
-
-        # Clean up extracted text
-        extracted_text = extracted_text.strip()
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Use image (.jpg, .png, .gif) or PDF."
+            )
 
         if not extracted_text:
             raise HTTPException(status_code=400, detail="Failed to extract text from file")
 
         # Extract contact info
-        emails = extract_emails(extracted_text)
-        phones = extract_phones(extracted_text)
-        names = extract_names(extracted_text)
-        company = extract_company(extracted_text)
+        emails = IngestService.extract_emails(extracted_text)
+        phones = IngestService.extract_phones(extracted_text)
+        names = IngestService.extract_names(extracted_text)
+        company = IngestService.extract_company(extracted_text)
 
         return OCRResult(
             extracted_text=extracted_text,
@@ -141,12 +71,14 @@ async def ingest_ocr(
         logger.error(f"Error in OCR ingest: {e}")
         raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
 
+
 @router.post("/ocr-and-classify")
 async def ingest_ocr_and_classify(
     file: UploadFile = File(...),
     company_name: Optional[str] = None,
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Upload a file (image or PDF), extract text, and immediately classify as a lead.
@@ -156,32 +88,20 @@ async def ingest_ocr_and_classify(
         # Step 1: Extract text
         contents = await file.read()
 
-        if file.content_type.startswith("image"):
-            # Image: OCR with Tesseract
-            image = Image.open(io.BytesIO(contents))
-            extracted_text = pytesseract.image_to_string(image, lang='eng')
+        if file.content_type and file.content_type.startswith("image"):
+            extracted_text = IngestService.extract_text_from_image(contents)
             source_type = "ocr_image"
         elif file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
-            # PDF: text extraction
-            if PdfReader is None:
-                raise HTTPException(status_code=500, detail="PDF support not available. Install: pip install pypdf")
-
             try:
-                pdf_file = io.BytesIO(contents)
-                reader = PdfReader(pdf_file)
-                pages_text = []
-                for page in reader.pages:
-                    text = page.extract_text()
-                    if text:
-                        pages_text.append(text)
-                extracted_text = "\n".join(pages_text)
+                extracted_text = IngestService.extract_text_from_pdf(contents)
                 source_type = "ocr_pdf"
-            except Exception as pdf_err:
-                raise HTTPException(status_code=400, detail=f"Failed to parse PDF: {str(pdf_err)}")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type. Use image or PDF.")
-
-        extracted_text = extracted_text.strip()
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Use image or PDF."
+            )
 
         if not extracted_text:
             raise HTTPException(status_code=400, detail="Failed to extract text from file")
@@ -190,10 +110,31 @@ async def ingest_ocr_and_classify(
         signal = SignalInput(
             signal_text=extracted_text,
             source_type=source_type,
-            company_name=company_name or extract_company(extracted_text),
+            company_name=company_name or IngestService.extract_company(extracted_text),
         )
 
-        result = await classify_signal_func(signal, background_tasks, db)
+        result = await ClassificationService.classify_signal(db, signal, settings)
+
+        # Queue dossier generation if needed
+        if ClassificationService.should_generate_dossier(result.total_score, settings):
+            lead_json = {
+                "role_type": result.classification.get("role_type"),
+                "company_name": signal.company_name,
+                "pain_tags": result.classification.get("pain_tags", []),
+                "situation": result.classification.get("situation", ""),
+                "problem": result.classification.get("problem", ""),
+            }
+            signal_snippets = [extracted_text[:500]]
+
+            if background_tasks:
+                background_tasks.add_task(
+                    ClassificationService.generate_dossier_async,
+                    result.lead_id,
+                    lead_json,
+                    signal_snippets,
+                    db,
+                )
+
         return result
 
     except HTTPException:
@@ -202,11 +143,13 @@ async def ingest_ocr_and_classify(
         logger.error(f"Error in OCR classify: {e}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
+
 @router.post("/csv")
 async def ingest_csv(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Bulk ingest from CSV and classify each signal.
@@ -241,9 +184,9 @@ async def ingest_csv(
                 company_website=row.get("company_website") or None,
             )
 
-            # Classify synchronously (for CSV, we do batch processing)
+            # Classify
             try:
-                result = await classify_signal_func(signal, background_tasks, db)
+                result = await ClassificationService.classify_signal(db, signal, settings)
                 results.append({
                     "company": company_name,
                     "score": result.total_score,

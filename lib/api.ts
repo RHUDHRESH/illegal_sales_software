@@ -1,11 +1,30 @@
 /**
- * Raptorflow Lead Engine - API Client
- * Thin wrapper around fetch for backend API calls
+ * Raptorflow Lead Engine - Typed API Client
+ * Thin wrapper around fetch for backend API calls with full type safety
  */
+
+import type {
+  ICP,
+  ICPCreate,
+  ICPUpdate,
+  Lead,
+  LeadFilter,
+  BucketCounts,
+  SignalInput,
+  ClassificationResult,
+  OCRResult,
+  CSVIngestResult,
+  JobBoardScrapeRequest,
+  CompanyScrapeRequest,
+  LeadDiscoveryRequest,
+  CareerPageScrapeRequest,
+  ScrapeResult,
+} from './types/api';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
-// Error handling
+// ============ Error Handling ============
+
 export class APIError extends Error {
   constructor(
     public status: number,
@@ -26,20 +45,6 @@ async function handleResponse<T>(response: Response): Promise<T> {
 
 // ============ ICP APIs ============
 
-export interface ICP {
-  id: number;
-  name: string;
-  description?: string;
-  size_buckets: string[];
-  industries: string[];
-  locations: string[];
-  hiring_keywords: string[];
-  pain_keywords: string[];
-  channel_preferences: string[];
-  created_at: string;
-  updated_at: string;
-}
-
 export async function listICPs(): Promise<ICP[]> {
   const response = await fetch(`${API_BASE}/api/icp/`);
   return handleResponse<ICP[]>(response);
@@ -50,7 +55,7 @@ export async function getICP(id: number): Promise<ICP> {
   return handleResponse<ICP>(response);
 }
 
-export async function createICP(icp: Omit<ICP, 'id' | 'created_at' | 'updated_at'>): Promise<ICP> {
+export async function createICP(icp: ICPCreate): Promise<ICP> {
   const response = await fetch(`${API_BASE}/api/icp/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -59,7 +64,7 @@ export async function createICP(icp: Omit<ICP, 'id' | 'created_at' | 'updated_at
   return handleResponse<ICP>(response);
 }
 
-export async function updateICP(id: number, icp: Partial<ICP>): Promise<ICP> {
+export async function updateICP(id: number, icp: ICPUpdate): Promise<ICP> {
   const response = await fetch(`${API_BASE}/api/icp/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -68,63 +73,30 @@ export async function updateICP(id: number, icp: Partial<ICP>): Promise<ICP> {
   return handleResponse<ICP>(response);
 }
 
-export async function deleteICP(id: number): Promise<void> {
+export async function deleteICP(id: number): Promise<{ message: string }> {
   const response = await fetch(`${API_BASE}/api/icp/${id}`, {
     method: 'DELETE',
   });
-  await handleResponse<unknown>(response);
+  return handleResponse<{ message: string }>(response);
+}
+
+export async function createSoloFounderTemplate(): Promise<ICP> {
+  const response = await fetch(`${API_BASE}/api/icp/templates/solo-founder`, {
+    method: 'POST',
+  });
+  return handleResponse<ICP>(response);
+}
+
+export async function createSmallD2CTemplate(): Promise<ICP> {
+  const response = await fetch(`${API_BASE}/api/icp/templates/small-d2c`, {
+    method: 'POST',
+  });
+  return handleResponse<ICP>(response);
 }
 
 // ============ Lead APIs ============
 
-export interface Lead {
-  id: number;
-  company_id: number;
-  contact_id?: number;
-  score_icp_fit: number;
-  score_marketing_pain: number;
-  score_data_quality: number;
-  total_score: number;
-  score_bucket: string;
-  role_type?: string;
-  pain_tags: string[];
-  situation?: string;
-  problem?: string;
-  implication?: string;
-  need_payoff?: string;
-  economic_buyer_guess?: string;
-  key_pain?: string;
-  chaos_flags: string[];
-  silver_bullet_phrases: string[];
-  context_dossier?: string;
-  challenger_insight?: string;
-  reframe_suggestion?: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-  company?: {
-    id: number;
-    name: string;
-    website?: string;
-    sector?: string;
-  };
-  contact?: {
-    id: number;
-    name?: string;
-    role?: string;
-    email?: string;
-    phone_numbers: string[];
-  };
-}
-
-export async function listLeads(params: {
-  score_min?: number;
-  score_max?: number;
-  status?: string;
-  score_bucket?: string;
-  limit?: number;
-  offset?: number;
-} = {}): Promise<Lead[]> {
+export async function listLeads(params: LeadFilter = {}): Promise<Lead[]> {
   const query = new URLSearchParams();
   if (params.score_min !== undefined) query.append('score_min', params.score_min.toString());
   if (params.score_max !== undefined) query.append('score_max', params.score_max.toString());
@@ -142,61 +114,41 @@ export async function getLead(id: number): Promise<Lead> {
   return handleResponse<Lead>(response);
 }
 
-export async function updateLeadStatus(id: number, status: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/leads/${id}/status`, {
+export async function updateLeadStatus(
+  id: number,
+  status: string
+): Promise<{ status: string; lead_id: number; new_status: string }> {
+  const response = await fetch(`${API_BASE}/api/leads/${id}/status?status=${status}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status }),
+  });
+  return handleResponse<{ status: string; lead_id: number; new_status: string }>(response);
+}
+
+export async function updateLeadNotes(
+  id: number,
+  notes: string
+): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/api/leads/${id}/notes?notes=${encodeURIComponent(notes)}`, {
+    method: 'PATCH',
   });
   return handleResponse<{ status: string }>(response);
 }
 
-export async function updateLeadNotes(id: number, notes: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/api/leads/${id}/notes`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ notes }),
-  });
-  return handleResponse<{ status: string }>(response);
-}
-
-export async function deleteLead(id: number): Promise<void> {
+export async function deleteLead(id: number): Promise<{ message: string }> {
   const response = await fetch(`${API_BASE}/api/leads/${id}`, {
     method: 'DELETE',
   });
-  await handleResponse<unknown>(response);
+  return handleResponse<{ message: string }>(response);
 }
 
-export async function getBucketCounts(): Promise<{
-  red_hot: number;
-  warm: number;
-  nurture: number;
-  parked: number;
-}> {
+export async function getBucketCounts(): Promise<BucketCounts> {
   const response = await fetch(`${API_BASE}/api/leads/score-distribution/bucket-counts`);
-  return handleResponse<{ red_hot: number; warm: number; nurture: number; parked: number }>(response);
+  return handleResponse<BucketCounts>(response);
 }
 
 // ============ Classification APIs ============
 
-export interface ClassifyPayload {
-  signal_text: string;
-  source_type?: string;
-  source_url?: string;
-  company_name?: string;
-  company_website?: string;
-}
-
-export interface ClassificationResult {
-  icp_match: boolean;
-  total_score: number;
-  score_bucket: string;
-  company_id?: number;
-  lead_id?: number;
-  classification: Record<string, unknown>;
-}
-
-export async function classifySignal(payload: ClassifyPayload): Promise<ClassificationResult> {
+export async function classifySignal(payload: SignalInput): Promise<ClassificationResult> {
   const response = await fetch(`${API_BASE}/api/classify/signal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -205,15 +157,18 @@ export async function classifySignal(payload: ClassifyPayload): Promise<Classifi
   return handleResponse<ClassificationResult>(response);
 }
 
-// ============ Ingest APIs ============
-
-export interface OCRResult {
-  extracted_text: string;
-  detected_emails: string[];
-  detected_phones: string[];
-  detected_names: string[];
-  detected_company?: string;
+export async function classifySignalsBatch(
+  signals: SignalInput[]
+): Promise<{ count: number; results: Array<{ signal: string; total_score?: number; status: string; error?: string }> }> {
+  const response = await fetch(`${API_BASE}/api/classify/signal/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(signals),
+  });
+  return handleResponse<{ count: number; results: Array<{ signal: string; total_score?: number; status: string; error?: string }> }>(response);
 }
+
+// ============ Ingest APIs ============
 
 export async function ocrFile(file: File): Promise<OCRResult> {
   const formData = new FormData();
@@ -226,7 +181,10 @@ export async function ocrFile(file: File): Promise<OCRResult> {
   return handleResponse<OCRResult>(response);
 }
 
-export async function ocrAndClassify(file: File, companyName?: string): Promise<ClassificationResult> {
+export async function ocrAndClassify(
+  file: File,
+  companyName?: string
+): Promise<ClassificationResult> {
   const formData = new FormData();
   formData.append('file', file);
   if (companyName) {
@@ -240,12 +198,7 @@ export async function ocrAndClassify(file: File, companyName?: string): Promise<
   return handleResponse<ClassificationResult>(response);
 }
 
-export async function ingestCSV(file: File): Promise<{
-  total_processed: number;
-  total_created: number;
-  results: Array<Record<string, unknown>>;
-  message: string;
-}> {
+export async function ingestCSV(file: File): Promise<CSVIngestResult> {
   const formData = new FormData();
   formData.append('file', file);
 
@@ -253,12 +206,63 @@ export async function ingestCSV(file: File): Promise<{
     method: 'POST',
     body: formData,
   });
+  return handleResponse<CSVIngestResult>(response);
+}
+
+// ============ Scraping APIs ============
+
+export async function scrapeJobBoards(request: JobBoardScrapeRequest): Promise<ScrapeResult> {
+  const response = await fetch(`${API_BASE}/api/scrape/job-boards`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return handleResponse<ScrapeResult>(response);
+}
+
+export async function scrapeCompanyWebsite(request: CompanyScrapeRequest): Promise<ScrapeResult> {
+  const response = await fetch(`${API_BASE}/api/scrape/company-website`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return handleResponse<ScrapeResult>(response);
+}
+
+export async function discoverLeads(request: LeadDiscoveryRequest): Promise<ScrapeResult> {
+  const response = await fetch(`${API_BASE}/api/scrape/discover-leads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return handleResponse<ScrapeResult>(response);
+}
+
+export async function scrapeCareerPage(request: CareerPageScrapeRequest): Promise<ScrapeResult> {
+  const response = await fetch(`${API_BASE}/api/scrape/career-page`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return handleResponse<ScrapeResult>(response);
+}
+
+export async function listScrapingSources(): Promise<{
+  job_boards: Array<{ name: string; description: string; regions: string[]; rate_limit: string; notes?: string }>;
+  search_engines: Array<{ name: string; description: string; rate_limit: string }>;
+  company_scraping: { description: string; features: string[] };
+}> {
+  const response = await fetch(`${API_BASE}/api/scrape/sources`);
   return handleResponse<{
-    total_processed: number;
-    total_created: number;
-    results: Array<Record<string, unknown>>;
-    message: string;
+    job_boards: Array<{ name: string; description: string; regions: string[]; rate_limit: string; notes?: string }>;
+    search_engines: Array<{ name: string; description: string; rate_limit: string }>;
+    company_scraping: { description: string; features: string[] };
   }>(response);
+}
+
+export async function checkScrapingHealth(): Promise<{ status: string; message: string }> {
+  const response = await fetch(`${API_BASE}/api/scrape/health`);
+  return handleResponse<{ status: string; message: string }>(response);
 }
 
 // ============ Health Check ============
