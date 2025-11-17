@@ -6,10 +6,12 @@ import Dashboard from '@/components/dashboard';
 import LeadsList from '@/components/leads-list';
 import ICPBuilder from '@/components/icp-builder';
 import OCRUploader from '@/components/ocr-uploader';
+import { WebScraper } from '@/components/web-scraper';
 
 const tabs = [
   { id: 'dashboard', label: '📊 Dashboard' },
   { id: 'leads', label: '🎯 Leads' },
+  { id: 'scraper', label: '🕷️ Web Scraper' },
   { id: 'icp', label: '🎨 ICP Whiteboard' },
   { id: 'ingest', label: '📸 OCR Ingest' },
 ];
@@ -69,7 +71,7 @@ export default function Home() {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-6 py-8">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-4 bg-slate-800 border border-slate-700 mb-6">
+          <TabsList className="grid w-full grid-cols-5 bg-slate-800 border border-slate-700 mb-6">
             {tabs.map((tab) => (
               <TabsTrigger key={tab.id} value={tab.id} className="text-sm">
                 {tab.label}
@@ -83,6 +85,10 @@ export default function Home() {
 
           <TabsContent value="leads" className="mt-0">
             <LeadsList />
+          </TabsContent>
+
+          <TabsContent value="scraper" className="mt-0">
+            <WebScraper />
           </TabsContent>
 
           <TabsContent value="icp" className="mt-0">

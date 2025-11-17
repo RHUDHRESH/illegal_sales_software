@@ -188,6 +188,28 @@ curl -X POST http://localhost:8000/api/ingest/ocr-and-classify \
 
 **CSV Bulk** – Upload a CSV with `company_name`, `signal_text` columns. Batch processed.
 
+**🆕 Web Scraping** – Automatically discover and collect leads from the web:
+
+- **Job Boards** – Scrape Indeed, Naukri, LinkedIn for job postings matching your criteria
+- **Company Websites** – Extract contact info, hiring signals, and career pages
+- **Lead Discovery** – Search engines to find potential customers
+- **Career Pages** – Target specific company career/jobs pages
+
+See [SCRAPING_GUIDE.md](./SCRAPING_GUIDE.md) for detailed documentation.
+
+```bash
+# Scrape job boards
+curl -X POST http://localhost:8000/api/scrape/job-boards \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "marketing manager",
+    "sources": ["indeed", "naukri"],
+    "num_pages": 3
+  }'
+```
+
+All scraped data automatically flows through the classification pipeline and creates leads.
+
 ### 3. Lead Management
 
 **List View** – All leads sorted by score (hottest first).
