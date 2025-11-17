@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from database import init_db, Base
 from config import Settings
-from routers import icp, leads, ingest, classify
+from routers import icp, leads, ingest, classify, scrape
 from ollama_wrapper import OllamaManager
 
 # Load settings
@@ -68,6 +68,7 @@ app.include_router(icp.router, prefix="/api/icp", tags=["ICP Management"])
 app.include_router(leads.router, prefix="/api/leads", tags=["Lead Management"])
 app.include_router(ingest.router, prefix="/api/ingest", tags=["Data Ingest"])
 app.include_router(classify.router, prefix="/api/classify", tags=["Classification"])
+app.include_router(scrape.router, tags=["Web Scraping"])
 
 @app.get("/")
 def root():
