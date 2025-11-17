@@ -12,8 +12,9 @@ from sqlalchemy.orm import sessionmaker
 
 from database import init_db, Base
 from config import Settings
-from routers import icp, leads, ingest, classify, scrape
+from routers import icp, leads, ingest, classify, scrape, enrichment, automation, analytics
 from ollama_wrapper import OllamaManager
+from automation.scheduler import job_scheduler
 
 # Load settings
 settings = Settings()
@@ -40,11 +41,16 @@ async def lifespan(app: FastAPI):
     ollama_manager = OllamaManager()
     await ollama_manager.ensure_models_loaded()
 
+    # Start job scheduler
+    print("⏰ Starting job scheduler...")
+    job_scheduler.start()
+
     print("✅ System ready!")
     yield
 
     # Shutdown
     print("🛑 Shutting down...")
+    job_scheduler.stop()
 
 # Create FastAPI app
 app = FastAPI(
@@ -69,6 +75,9 @@ app.include_router(leads.router, prefix="/api/leads", tags=["Lead Management"])
 app.include_router(ingest.router, prefix="/api/ingest", tags=["Data Ingest"])
 app.include_router(classify.router, prefix="/api/classify", tags=["Classification"])
 app.include_router(scrape.router, tags=["Web Scraping"])
+app.include_router(enrichment.router, tags=["Enrichment & Export"])
+app.include_router(automation.router, tags=["Automation & Webhooks"])
+app.include_router(analytics.router, tags=["Analytics & Insights"])
 
 @app.get("/")
 def root():

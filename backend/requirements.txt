@@ -22,3 +22,10 @@ tenacity==8.2.3
 lxml==4.9.3
 webdriver-manager==4.0.1
 aiohttp==3.9.1
+dnspython==2.4.2
+openpyxl==3.1.2
+pandas==2.1.4
+reportlab==4.0.7
+python-dateutil==2.8.2
+cachetools==5.3.2
+redis==5.0.1
