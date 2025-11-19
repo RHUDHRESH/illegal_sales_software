@@ -16,7 +16,8 @@ from typing import List, Optional
 
 from job_board_apis import JobBoardAPIClient, job_to_signal_text
 from routers.classify import SignalInput, classify_signal as classify_signal_func
-from database import SessionLocal
+from database import SessionLocal, Lead
+from config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,59 @@ async def scheduled_rss_feed_monitor():
         return {"error": str(e)}
 
 
+async def scheduled_auto_park_leads():
+    """
+    Scheduled task to auto-park old leads that haven't been contacted.
+    Runs daily at 2:00 AM.
+    """
+    logger.info("Starting scheduled auto-park of old leads...")
+
+    settings = Settings()
+
+    if not settings.enable_auto_park:
+        logger.info("Auto-park is disabled in configuration")
+        return {"message": "Auto-park disabled"}
+
+    db = SessionLocal()
+    try:
+        from datetime import timedelta
+
+        cutoff_date = datetime.utcnow() - timedelta(days=settings.auto_park_days)
+
+        # Find leads to park
+        leads_to_park = db.query(Lead).filter(
+            Lead.status == "new",
+            Lead.created_at < cutoff_date,
+            Lead.auto_parked_at.is_(None)
+        ).all()
+
+        parked_count = 0
+        for lead in leads_to_park:
+            lead.status = "parked"
+            lead.auto_parked_at = datetime.utcnow()
+            lead.notes = (lead.notes or "") + f"\n[Auto-parked on {datetime.utcnow().date()} - no contact for {settings.auto_park_days} days]"
+            db.add(lead)
+            parked_count += 1
+
+        db.commit()
+
+        logger.info(f"✅ Auto-parked {parked_count} leads older than {settings.auto_park_days} days")
+
+        return {
+            "parked_count": parked_count,
+            "cutoff_date": cutoff_date.isoformat(),
+            "auto_park_days": settings.auto_park_days,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in scheduled auto-park: {e}")
+        return {"error": str(e)}
+
+    finally:
+        db.close()
+
+
 # ============================================================================
 # Scheduler Configuration
 # ============================================================================
@@ -196,6 +250,18 @@ def configure_scheduler():
         replace_existing=True,
     )
     logger.info("Scheduled: RSS Feed Monitor every 6 hours")
+
+    # Auto-park old leads - Daily at 2:00 AM
+    settings = Settings()
+    if settings.enable_auto_park:
+        scheduler.add_job(
+            scheduled_auto_park_leads,
+            trigger=CronTrigger(hour=2, minute=0),
+            id="auto_park_leads",
+            name="Auto-Park Old Leads",
+            replace_existing=True,
+        )
+        logger.info(f"Scheduled: Auto-Park Old Leads at 2:00 AM (park after {settings.auto_park_days} days)")
 
     # Add more scheduled tasks here as needed
     # Examples:

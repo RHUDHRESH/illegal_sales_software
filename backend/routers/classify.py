@@ -1,4 +1,4 @@
-"""Enhanced classification logic with concurrent processing, caching, and embeddings."""
+"""Enhanced classification logic with concurrent processing, caching, embeddings, and advanced scoring heuristics."""
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -6,13 +6,14 @@ from typing import Dict, Any, Optional, List
 import asyncio
 import json
 import logging
-from database import Lead, Company, Contact, Signal, ICPProfile, SessionLocal
+from database import Lead, Company, Contact, Signal, ICPProfile, SessionLocal, FundingEvent, ScoreOverride, ContentActivity
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import Settings
 from ollama_wrapper import get_ollama_manager
 from cache_manager import get_cache_manager
 from prompt_templates import get_prompt_manager
+from scoring_heuristics import get_scoring_heuristics
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,6 +31,8 @@ class SignalInput(BaseModel):
     source_url: Optional[str] = None
     company_name: Optional[str] = None
     company_website: Optional[str] = None
+    post_date: Optional[datetime] = None  # When signal was posted
+    industry: Optional[str] = None  # Industry classification
 
 class ClassificationResult(BaseModel):
     icp_match: bool
@@ -38,6 +41,8 @@ class ClassificationResult(BaseModel):
     classification: Dict[str, Any]
     company_id: Optional[int]
     lead_id: Optional[int]
+    heuristic_adjustments: Optional[List[Dict[str, Any]]] = []
+    score_explanation: Optional[Dict[str, Any]] = None
 
 def compute_score_bucket(total_score: float) -> str:
     """Convert score to bucket."""
@@ -108,12 +113,70 @@ async def classify_signal(
         # 1B classification (with caching)
         classification = await ollama.classify_signal(signal.signal_text, icp_context, use_cache=True)
 
-        # Compute total score
-        total_score = (
-            classification.get("score_fit", 0) +
-            classification.get("score_pain", 0) +
-            classification.get("score_data_quality", 0)
-        )
+        # Base scores
+        base_score_fit = classification.get("score_fit", 0)
+        base_score_pain = classification.get("score_pain", 0)
+        base_score_quality = classification.get("score_data_quality", 0)
+
+        # Apply scoring heuristics if enabled
+        heuristic_adjustments = []
+        total_adjustment = 0
+        score_explanation = None
+
+        if settings.enable_scoring_heuristics:
+            scoring_heuristics = get_scoring_heuristics()
+            if scoring_heuristics:
+                # Apply heuristics
+                total_adjustment, adjustments = scoring_heuristics.apply_all_heuristics(
+                    signal_text=signal.signal_text,
+                    post_date=signal.post_date,
+                    company_name=signal.company_name,
+                    source_url=signal.source_url,
+                    industry=signal.industry
+                )
+                heuristic_adjustments = [
+                    {
+                        "category": adj.category,
+                        "adjustment": adj.adjustment,
+                        "reason": adj.reason,
+                        "confidence": adj.confidence
+                    }
+                    for adj in adjustments
+                ]
+
+                # Generate score explanation
+                score_explanation = scoring_heuristics.explain_score(
+                    base_scores={
+                        "score_fit": base_score_fit,
+                        "score_pain": base_score_pain,
+                        "score_data_quality": base_score_quality
+                    },
+                    adjustments=adjustments
+                )
+
+        # Compute final score
+        base_total = base_score_fit + base_score_pain + base_score_quality
+        total_score = base_total + total_adjustment
+
+        # Check for funding boost
+        if signal.company_name:
+            recent_funding = db.query(FundingEvent).filter(
+                FundingEvent.company_id.isnot(None),
+                FundingEvent.announced_date >= datetime.utcnow() - timedelta(days=settings.funding_boost_days)
+            ).first()
+            if recent_funding:
+                funding_bonus = settings.funding_boost_score
+                total_score += funding_bonus
+                heuristic_adjustments.append({
+                    "category": "funding_event",
+                    "adjustment": funding_bonus,
+                    "reason": f"Recent funding event within {settings.funding_boost_days} days",
+                    "confidence": 0.9
+                })
+                logger.info(f"Funding boost applied: +{funding_bonus} (company: {signal.company_name})")
+
+        # Clamp score to 0-100
+        total_score = max(0, min(100, total_score))
         score_bucket = compute_score_bucket(total_score)
 
         # Get or create company
@@ -147,7 +210,14 @@ async def classify_signal(
         db.commit()
         db.refresh(db_signal)
 
-        # Create lead
+        # Extract heuristic scores from adjustments
+        ghost_job_score = next((adj["adjustment"] for adj in heuristic_adjustments if adj["category"] == "ghost_job"), 0)
+        first_marketer_bonus = next((adj["adjustment"] for adj in heuristic_adjustments if adj["category"] == "first_marketer"), 0)
+        founder_tone_score = next((adj["adjustment"] for adj in heuristic_adjustments if adj["category"] == "tone_classification"), 0)
+        industry_bonus = next((adj["adjustment"] for adj in heuristic_adjustments if adj["category"] == "industry_specific"), 0)
+        spam_penalty = next((adj["adjustment"] for adj in heuristic_adjustments if adj["category"] == "spam_detection"), 0)
+
+        # Create lead with heuristics metadata
         db_lead = Lead(
             company_id=company_id,
             score_icp_fit=classification.get("score_fit", 0),
@@ -166,6 +236,13 @@ async def classify_signal(
             chaos_flags=classification.get("chaos_flags", []),
             silver_bullet_phrases=classification.get("silver_bullet_phrases", []),
             status="new",
+            heuristic_adjustments=heuristic_adjustments,
+            ghost_job_score=ghost_job_score,
+            first_marketer_bonus=first_marketer_bonus,
+            founder_tone_score=founder_tone_score,
+            industry_bonus=industry_bonus,
+            spam_penalty=spam_penalty,
+            signal_post_date=signal.post_date,
         )
         db.add(db_lead)
         db.commit()
@@ -202,6 +279,8 @@ async def classify_signal(
             classification=classification,
             company_id=company_id,
             lead_id=db_lead.id,
+            heuristic_adjustments=heuristic_adjustments,
+            score_explanation=score_explanation,
         )
 
     except Exception as e:
@@ -433,4 +512,243 @@ async def reload_prompt_templates():
         "status": "ok",
         "message": "Templates reloaded successfully",
         "templates": prompt_manager.list_templates()
+    }
+
+
+# Funding Events Management
+
+class FundingEventInput(BaseModel):
+    company_name: str
+    event_type: str  # "seed", "series_a", "series_b", etc.
+    amount_usd: Optional[float] = None
+    announced_date: datetime
+    source: Optional[str] = "manual"
+    notes: Optional[str] = None
+
+
+@router.post("/funding-events")
+async def create_funding_event(
+    event: FundingEventInput,
+    db: Session = Depends(get_db)
+):
+    """
+    Add a funding event for a company.
+
+    This will boost leads for this company if posted within the funding_boost_days window.
+    """
+    # Find company
+    company = db.query(Company).filter(
+        Company.name.ilike(event.company_name)
+    ).first()
+
+    if not company:
+        # Create company if doesn't exist
+        company = Company(name=event.company_name, country="india")
+        db.add(company)
+        db.commit()
+        db.refresh(company)
+
+    # Create funding event
+    db_event = FundingEvent(
+        company_id=company.id,
+        event_type=event.event_type,
+        amount_usd=event.amount_usd,
+        announced_date=event.announced_date,
+        source=event.source,
+        notes=event.notes
+    )
+    db.add(db_event)
+    db.commit()
+    db.refresh(db_event)
+
+    logger.info(f"✅ Funding event created: {company.name} - {event.event_type}")
+
+    return {
+        "id": db_event.id,
+        "company_id": company.id,
+        "company_name": company.name,
+        "event_type": event.event_type,
+        "announced_date": event.announced_date
+    }
+
+
+@router.get("/funding-events")
+async def list_funding_events(
+    days: int = 90,
+    db: Session = Depends(get_db)
+):
+    """List recent funding events."""
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    events = db.query(FundingEvent).filter(
+        FundingEvent.announced_date >= cutoff_date
+    ).order_by(FundingEvent.announced_date.desc()).all()
+
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "id": event.id,
+                "company_id": event.company_id,
+                "event_type": event.event_type,
+                "amount_usd": event.amount_usd,
+                "announced_date": event.announced_date,
+                "source": event.source,
+                "notes": event.notes
+            }
+            for event in events
+        ]
+    }
+
+
+# Manual Score Overrides
+
+class ScoreOverrideInput(BaseModel):
+    override_score: float
+    reason: Optional[str] = None
+    user: str = "admin"
+
+
+@router.post("/leads/{lead_id}/override-score")
+async def override_lead_score(
+    lead_id: int,
+    override: ScoreOverrideInput,
+    db: Session = Depends(get_db)
+):
+    """
+    Manually override a lead's score.
+
+    The override is stored separately and applied on top of the calculated score.
+    """
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    # Store override
+    original_score = lead.total_score
+
+    db_override = ScoreOverride(
+        lead_id=lead_id,
+        user=override.user,
+        original_score=original_score,
+        override_score=override.override_score,
+        reason=override.reason
+    )
+    db.add(db_override)
+
+    # Update lead
+    lead.manual_score_override = override.override_score
+    lead.override_reason = override.reason
+    lead.total_score = override.override_score
+    lead.score_bucket = compute_score_bucket(override.override_score)
+    lead.updated_at = datetime.utcnow()
+
+    db.commit()
+
+    logger.info(f"✅ Score override applied to lead {lead_id}: {original_score} → {override.override_score}")
+
+    return {
+        "lead_id": lead_id,
+        "original_score": original_score,
+        "override_score": override.override_score,
+        "new_bucket": lead.score_bucket,
+        "reason": override.reason
+    }
+
+
+@router.get("/leads/{lead_id}/score-history")
+async def get_score_history(
+    lead_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get score override history for a lead."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    overrides = db.query(ScoreOverride).filter(
+        ScoreOverride.lead_id == lead_id
+    ).order_by(ScoreOverride.timestamp.desc()).all()
+
+    return {
+        "lead_id": lead_id,
+        "current_score": lead.total_score,
+        "manual_override": lead.manual_score_override,
+        "override_count": len(overrides),
+        "history": [
+            {
+                "id": override.id,
+                "user": override.user,
+                "original_score": override.original_score,
+                "override_score": override.override_score,
+                "reason": override.reason,
+                "timestamp": override.timestamp
+            }
+            for override in overrides
+        ]
+    }
+
+
+# Auto-park leads
+
+@router.post("/leads/auto-park")
+async def auto_park_old_leads(
+    dry_run: bool = False,
+    db: Session = Depends(get_db)
+):
+    """
+    Automatically park leads that haven't been contacted in auto_park_days.
+
+    Args:
+        dry_run: If true, just return what would be parked without changing anything
+    """
+    settings = Settings()
+
+    if not settings.enable_auto_park:
+        return {"message": "Auto-park is disabled in configuration"}
+
+    cutoff_date = datetime.utcnow() - timedelta(days=settings.auto_park_days)
+
+    # Find leads to park:
+    # - Status is "new" (not contacted)
+    # - Created more than auto_park_days ago
+    # - Not already parked
+    leads_to_park = db.query(Lead).filter(
+        Lead.status == "new",
+        Lead.created_at < cutoff_date,
+        Lead.auto_parked_at.is_(None)
+    ).all()
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "leads_to_park": len(leads_to_park),
+            "leads": [
+                {
+                    "id": lead.id,
+                    "company_id": lead.company_id,
+                    "total_score": lead.total_score,
+                    "created_at": lead.created_at,
+                    "days_old": (datetime.utcnow() - lead.created_at).days
+                }
+                for lead in leads_to_park
+            ]
+        }
+
+    # Actually park the leads
+    parked_count = 0
+    for lead in leads_to_park:
+        lead.status = "parked"
+        lead.auto_parked_at = datetime.utcnow()
+        lead.notes = (lead.notes or "") + f"\n[Auto-parked on {datetime.utcnow().date()} - no contact for {settings.auto_park_days} days]"
+        db.add(lead)
+        parked_count += 1
+
+    db.commit()
+
+    logger.info(f"✅ Auto-parked {parked_count} leads older than {settings.auto_park_days} days")
+
+    return {
+        "parked_count": parked_count,
+        "cutoff_date": cutoff_date,
+        "auto_park_days": settings.auto_park_days
     }

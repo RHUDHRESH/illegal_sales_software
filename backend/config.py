@@ -73,6 +73,20 @@ class Settings(BaseSettings):
     prompt_template_path: str = os.getenv("PROMPT_TEMPLATE_PATH", "./prompts")
     enable_custom_prompts: bool = os.getenv("ENABLE_CUSTOM_PROMPTS", "false").lower() == "true"
 
+    # Scoring Heuristics
+    enable_scoring_heuristics: bool = os.getenv("ENABLE_SCORING_HEURISTICS", "true").lower() == "true"
+    scoring_weight_icp_fit: float = float(os.getenv("SCORING_WEIGHT_ICP_FIT", "1.0"))
+    scoring_weight_marketing_pain: float = float(os.getenv("SCORING_WEIGHT_MARKETING_PAIN", "1.0"))
+    scoring_weight_data_quality: float = float(os.getenv("SCORING_WEIGHT_DATA_QUALITY", "1.0"))
+
+    # Auto-park Settings
+    enable_auto_park: bool = os.getenv("ENABLE_AUTO_PARK", "true").lower() == "true"
+    auto_park_days: int = int(os.getenv("AUTO_PARK_DAYS", "30"))  # Park after 30 days uncontacted
+
+    # Funding Events
+    funding_boost_days: int = int(os.getenv("FUNDING_BOOST_DAYS", "60"))  # Boost if posted within 60 days of funding
+    funding_boost_score: float = float(os.getenv("FUNDING_BOOST_SCORE", "10.0"))  # Bonus points
+
     class Config:
         env_file = ".env"
         case_sensitive = False

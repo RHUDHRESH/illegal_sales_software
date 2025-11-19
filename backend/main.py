@@ -16,6 +16,7 @@ from routers import icp, leads, ingest, classify, scrape, advanced_scraping
 from ollama_wrapper import init_ollama_manager, get_ollama_manager
 from cache_manager import init_cache_manager, get_cache_manager
 from prompt_templates import init_prompt_manager, get_prompt_manager
+from scoring_heuristics import init_scoring_heuristics, get_scoring_heuristics
 from scheduled_tasks import start_scheduler, stop_scheduler
 
 # Load settings
@@ -59,6 +60,17 @@ async def lifespan(app: FastAPI):
     await ollama_manager.ensure_models_loaded()
     print(f"✅ Ollama ready: 1B={ollama_manager.model_1b}, 4B={ollama_manager.model_4b}")
 
+    # Initialize scoring heuristics
+    print("🎯 Initializing scoring heuristics...")
+    scoring_heuristics = init_scoring_heuristics(
+        scoring_weights={
+            "icp_fit": settings.scoring_weight_icp_fit,
+            "marketing_pain": settings.scoring_weight_marketing_pain,
+            "data_quality": settings.scoring_weight_data_quality
+        }
+    )
+    print(f"✅ Scoring heuristics initialized (weights: fit={settings.scoring_weight_icp_fit}, pain={settings.scoring_weight_marketing_pain}, quality={settings.scoring_weight_data_quality})")
+
     # Start scheduled tasks
     print("⏰ Starting scheduled tasks...")
     start_scheduler()
@@ -71,6 +83,8 @@ async def lifespan(app: FastAPI):
     print(f"  📝 Prompts: {len(prompt_manager.list_templates())} templates")
     print(f"  ⚡ Health Monitoring: {settings.enable_health_monitoring}")
     print(f"  🔄 Batch Parallel: {settings.batch_enable_parallel} (max={settings.batch_concurrency_limit})")
+    print(f"  🎯 Scoring Heuristics: {settings.enable_scoring_heuristics}")
+    print(f"  🅿️  Auto-park: {settings.enable_auto_park} (after {settings.auto_park_days} days)")
     print("="*60 + "\n")
 
     yield
